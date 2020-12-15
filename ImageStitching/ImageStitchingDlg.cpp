@@ -6,6 +6,7 @@
 #include "ImageStitching.h"
 #include "ImageStitchingDlg.h"
 #include "afxdialogex.h"
+#include <opencv2/opencv.hpp>
 
 
 #ifdef _DEBUG
@@ -174,24 +175,90 @@ HCURSOR CImageStitchingDlg::OnQueryDragIcon()
 
 void CImageStitchingDlg::OnBnClickedOk()
 {
-	Mat result;
-	Stitcher stitcher = Stitcher::createDefault();
+	// 이미지 보여주기
+	cv::imshow("Left", input_imgs[0]);
+	cv::imshow("Right", input_imgs[1]);
 
-	imshow("img1", input_imgs[0]);
-	imshow("img2", input_imgs[1]);
+	// 이미지 크기 재조정
+	//Size size(1200, 800);
+	//resize(input_imgs[0], input_imgs[0], size);
+	//resize(input_imgs[1], input_imgs[1], size);
 
-	Stitcher::Status status = stitcher.stitch(input_imgs, result);
+	// 흑백 이미지 생성
+	Mat gray_image1;
+	Mat gray_image2;
 
-	if (status != Stitcher::OK)
+	// 컬러 이미지를 흑백 이미지로 변경
+	cvtColor(input_imgs[1], gray_image1, COLOR_RGB2GRAY);
+	cvtColor(input_imgs[0], gray_image2, COLOR_RGB2GRAY);
+
+	// SIFT를 이용해서 특징점 찾고 디스크립터에 특징 저장 
+	Ptr<SIFT> detector = SIFT::create();
+	vector<KeyPoint> keypoints_left, keypoints_right;
+	Mat descriptors_left, descriptors_right;
+
+	detector->detectAndCompute(gray_image1, noArray(), keypoints_left, descriptors_left);
+	detector->detectAndCompute(gray_image2, noArray(), keypoints_right, descriptors_right);
+
+	// Flann 방식과 K-Nearest Neighbor 알고리즘을 이용해서 특징점 매칭
+	Ptr<DescriptorMatcher> matcher = DescriptorMatcher::create(DescriptorMatcher::FLANNBASED);
+	vector<vector<DMatch>> knn_matches;
+	matcher->knnMatch(descriptors_left, descriptors_right, knn_matches, 2);
+
+	// 좋은 매칭만 걸러내는 작업
+	const float ratio_thresh = 0.7f;
+	vector<DMatch> good_matches;
+
+	for (size_t i = 0; i < knn_matches.size(); i++)
 	{
-		printf("Can't stitch images, error code =  %d", status);
+		if (knn_matches[i][0].distance < ratio_thresh * knn_matches[i][1].distance)
+		{
+			good_matches.push_back(knn_matches[i][0]);
+		}
 	}
-	else {
 
-		imshow("result", result);
+	// 좋은 매칭들의 특징점들을 얻어오기
+	vector<Point2f> left;
+	vector<Point2f> right;
+
+	for (int i = 0; i < good_matches.size(); i++)
+	{
+		left.push_back(keypoints_left[good_matches[i].queryIdx].pt);
+		right.push_back(keypoints_right[good_matches[i].trainIdx].pt);
 	}
 
-	waitKey();
+	// 호모그래피 행렬 찾기
+	Mat H = findHomography(left, right, RANSAC);
+
+	// 이미지를 보정하는데 호모그래피 행렬 사용
+	Mat result;
+
+	warpPerspective(input_imgs[1], result, H, Size(input_imgs[1].cols + input_imgs[0].cols, input_imgs[1].rows));
+	Mat half(result, Rect(0, 0, input_imgs[0].cols, input_imgs[0].rows));
+	input_imgs[0].copyTo(half);
+
+	// 이미지 보정으로 생긴 검은 부분을 위한 처리
+	vector<Point> nonBlackList;
+	nonBlackList.reserve(result.rows * result.cols);
+
+	// 검은 부분을 가지지 않는 것들을 벡터에 추가
+	for (int j = 0; j < result.rows; ++j)
+		for (int i = 0; i < result.cols; ++i)
+		{
+			if (result.at<Vec3b>(j, i) != Vec3b(0, 0, 0))
+			{
+				nonBlackList.push_back(Point(i, j));
+			}
+		}
+
+	// 포인트들을 감싸는 사각형 생성
+	Rect bb = boundingRect(nonBlackList);
+
+	// 결과 이미지를 보여주기
+	imshow("Reult", result(bb));
+
+	waitKey(0);
+	
 	// TODO: 여기에 컨트롤 알림 처리기 코드를 추가합니다.
 	CDialogEx::OnOK();
 }
@@ -256,14 +323,14 @@ void CImageStitchingDlg::OnBnClickedOpenbutton1()
 
 	if (IDOK == dlg.DoModal())
 	{
+		// 이미지 경로 획득
 		CString img_path = dlg.GetPathName();
 
-
+		// Image Path 넣기
 		Edit_File_Inputimage1.SetWindowTextA(dlg.GetFileTitle());
 
-
-		IplImage* img = cvLoadImage((LPSTR)(LPCSTR)img_path);
-		Mat matImg = cvarrToMat(img, false);
+		// imread로 읽어오기
+		Mat matImg = imread((LPSTR)(LPCSTR)img_path);
 		input_imgs.push_back(matImg);
 	}
 }
@@ -281,17 +348,13 @@ void CImageStitchingDlg::OnBnClickedOpenbutton2()
 	{
 
 		// 이미지 경로 획득
-
 		CString img_path = dlg.GetPathName();
 
 		// Image Path 넣기
-
 		Edit_File_Inputimage2.SetWindowTextA(dlg.GetFileTitle());
 
-		// IplImage로 읽어오기
-
-		IplImage* img = cvLoadImage((LPSTR)(LPCSTR)img_path);
-		Mat matImg = Mat(cvarrToMat(img));
+		// imread로 읽어오기
+		Mat matImg = imread((LPSTR)(LPCSTR)img_path);
 		input_imgs.push_back(matImg);
 	}
 }
